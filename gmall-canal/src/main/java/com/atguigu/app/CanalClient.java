@@ -12,6 +12,7 @@ import com.google.protobuf.InvalidProtocolBufferException;
 
 import java.net.InetSocketAddress;
 import java.util.List;
+import java.util.Random;
 
 public class CanalClient {
     public static void main(String[] args) throws InvalidProtocolBufferException {
@@ -85,18 +86,35 @@ public class CanalClient {
     private static void handle(String tableName, CanalEntry.EventType eventType, List<CanalEntry.RowData> rowDatasList) {
         if ("order_info".equals(tableName)&&CanalEntry.EventType.INSERT.equals(eventType)){
             //获取每一条数据
-            for (CanalEntry.RowData rowData : rowDatasList) {
-                List<CanalEntry.Column> afterColumnsList = rowData.getAfterColumnsList();
-                JSONObject jsonObject = new JSONObject();
-                for (CanalEntry.Column column : afterColumnsList) {
-                    jsonObject.put(column.getName(), column.getValue());
-                }
-                System.out.println(jsonObject.toString());
-
-                //将数据发送到kafka中
-                MyKafkaSender.send(GmallConstants.KAFKA_TOPIC_ORDER, jsonObject.toString());
-            }
+            saveTokafka(rowDatasList, GmallConstants.KAFKA_TOPIC_ORDER);
+        }else if("order_detail".equals(tableName)&&CanalEntry.EventType.INSERT.equals(eventType)){
+            //获取每一条数据
+            saveTokafka(rowDatasList, GmallConstants.KAFKA_TOPIC_ORDER_DETAIL);
+        }else if ("user_info".equals(tableName)&&(CanalEntry.EventType.INSERT.equals(eventType)||CanalEntry.EventType.UPDATE.equals(eventType))){
+            //获取每一条数据
+            saveTokafka(rowDatasList, GmallConstants.KAFKA_TOPIC_USER);
         }
 
+    }
+
+    private static void saveTokafka(List<CanalEntry.RowData> rowDatasList, String kafkaTopicOrder) {
+        for (CanalEntry.RowData rowData : rowDatasList) {
+            List<CanalEntry.Column> afterColumnsList = rowData.getAfterColumnsList();
+            JSONObject jsonObject = new JSONObject();
+            for (CanalEntry.Column column : afterColumnsList) {
+                jsonObject.put(column.getName(), column.getValue());
+            }
+            System.out.println(jsonObject.toString());
+
+            //模拟网络震荡
+            try {
+                Thread.sleep(new Random().nextInt(5)*1000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+
+            //将数据发送到kafka中
+            MyKafkaSender.send(kafkaTopicOrder, jsonObject.toString());
+        }
     }
 }
