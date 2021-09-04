@@ -3,15 +3,16 @@ package com.atguigu.app
 import java.util
 
 import com.alibaba.fastjson.JSON
-import com.atguigu.bean.{OrderDetail, OrderInfo, SaleDetail}
+import com.atguigu.bean.{OrderDetail, OrderInfo, SaleDetail, UserInfo}
 import com.atguigu.constants.GmallConstants
-import com.atguigu.utils.MyKafkaUtil
+import com.atguigu.utils.{MyEsUtil, MyKafkaUtil}
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.spark.SparkConf
 import org.apache.spark.streaming.{Seconds, StreamingContext}
 import org.apache.spark.streaming.dstream.{DStream, InputDStream}
 import redis.clients.jedis.Jedis
 import org.json4s.native.Serialization
+
 import collection.JavaConverters._
 
 object SaleDetailApp {
@@ -55,7 +56,7 @@ object SaleDetailApp {
     val joinDStream: DStream[(String, (Option[OrderInfo], Option[OrderDetail]))] = orderInfoDStream.fullOuterJoin(orderDetailDStream)
 
     //6.通过加缓存的方式来解决数据丢失问题
-    joinDStream.mapPartitions(partition => {
+    val noUserSaleDetailDStream: DStream[SaleDetail] = joinDStream.mapPartitions(partition => {
       implicit val formats = org.json4s.DefaultFormats
       //创建redis连接
       val jedis: Jedis = new Jedis("hadoop102", 6379)
@@ -66,7 +67,7 @@ object SaleDetailApp {
         //OrderInfo RedisKey
         val orderInfoRedisKey: String = "orderInfo:" + orderid
         //OrderDetail Rediskey
-        val orderDetailRedisKey: String = "orderDetail:"+orderid
+        val orderDetailRedisKey: String = "orderDetail:" + orderid
 
         //a.判断orderInfo是否存在
         if (infoOpt.isDefined) {
@@ -86,26 +87,73 @@ object SaleDetailApp {
 
           jedis.set(orderInfoRedisKey, orderInfoJson)
           //设置过期时间
-          jedis.expire(orderInfoRedisKey,30)
+          jedis.expire(orderInfoRedisKey, 30)
 
-          //a.4对对方缓存中（orderDetail缓存）查询是否有能够关联上的数据
+          //a.4去对方缓存中（orderDetail缓存）查询是否有能够关联上的数据
           //判断对方缓存中是否有能够关联上的rediskey
-          if (jedis.exists(orderDetailRedisKey)){
+          if (jedis.exists(orderDetailRedisKey)) {
             val orderDetails: util.Set[String] = jedis.smembers(orderDetailRedisKey)
             for (elem <- orderDetails.asScala) {
               //将查询出来的json串转为样例类
-              val orderDetail: OrderDetail = JSON.parseObject(elem,classOf[OrderDetail])
-              val detail: SaleDetail = new SaleDetail(orderInfo,orderDetail)
+              val orderDetail: OrderDetail = JSON.parseObject(elem, classOf[OrderDetail])
+              val detail: SaleDetail = new SaleDetail(orderInfo, orderDetail)
               details.add(detail)
             }
           }
-
-
+        } else {
+          //b.orderInfo数据不在
+          if (deatilOpt.isDefined) {
+            //orderDetail数据在
+            val orderDetail: OrderDetail = deatilOpt.get
+            //b.2判断对方缓存中是否有对应的orderInfo数据
+            if (jedis.exists(orderInfoRedisKey)) {
+              //b.3获取能够join上orderDetail的info数据
+              val infoStr: String = jedis.get(orderInfoRedisKey)
+              //b.4将字符串转为样例类
+              val orderInfo: OrderInfo = JSON.parseObject(infoStr, classOf[OrderInfo])
+              //b.5将orderInfo和orderDetail组合为样例类
+              val detail: SaleDetail = new SaleDetail(orderInfo, orderDetail)
+              //b.6将样例类写入结果集合
+              details.add(detail)
+            } else {
+              //c.如果对方缓存中没有能关联上的数据，则把自己写入Redis缓存
+              val orderDetailJson: String = Serialization.write(orderDetail)
+              jedis.sadd(orderDetailRedisKey, orderDetailJson)
+              jedis.expire(orderDetailRedisKey, 30)
+            }
+          }
         }
 
       }
       jedis.close()
-      partition
+      details.asScala.toIterator
+    })
+    //7.关联UserInfo数据
+    val saleDetailDStream: DStream[SaleDetail] = noUserSaleDetailDStream.mapPartitions(partition => {
+      //获取redis连接
+      val jedis: Jedis = new Jedis("hadoop102", 6379)
+      val details: Iterator[SaleDetail] = partition.map(saleDetail => {
+        //根据rediskey查询userInfo数据
+        val redisKey: String = "userInfo:" + saleDetail.user_id
+        val userInfoJsonStr: String = jedis.get(redisKey)
+        //将字符串转为样例类
+        val userInfo: UserInfo = JSON.parseObject(userInfoJsonStr, classOf[UserInfo])
+        saleDetail.mergeUserInfo(userInfo)
+        saleDetail
+      })
+      jedis.close()
+      details
+    })
+    saleDetailDStream.print()
+
+    //8.将数据保存至ES
+    saleDetailDStream.foreachRDD(rdd=>{
+      rdd.foreachPartition(partition=>{
+        val list: List[(String, SaleDetail)] = partition.toList.map(saleDetail => {
+          (saleDetail.order_detail_id, saleDetail)
+        })
+        MyEsUtil.insertBulk(GmallConstants.ES_INDEX_DETAIL+"0426",list)
+      })
     })
 
     ssc.start()
