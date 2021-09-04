@@ -1,5 +1,6 @@
 package com.atguigu.gmallpublisher.service;
 
+import java.io.IOException;
 import java.util.Map;
 
 public interface PublisherService {
@@ -14,6 +15,9 @@ public interface PublisherService {
 
     //处理交易额分时抽象方法
     public Map getGmvTotalHour(String date);
+
+    //处理灵活分析数据的抽象方法
+    public Map SaleDetail(String date, Integer startpage, Integer size, String keyword) throws IOException;
 
 
 }
